@@ -33,9 +33,9 @@ from av.bitstream import BitStreamFilterContext, bitstream_filters_available
 from av.codec.codec import Codec, codecs_available
 from av.codec.context import CodecContext
 from av.container import open
+from av.error import *  # noqa: F403; This is limited to exception types.
 from av.format import ContainerFormat, formats_available
 from av.packet import Packet
-from av.error import *  # noqa: F403; This is limited to exception types.
 from av.video.format import VideoFormat
 from av.video.frame import VideoFrame
 
