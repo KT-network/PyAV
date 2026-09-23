@@ -17,6 +17,14 @@ We are operating with `semantic versioning <http://semver.org>`_.
     are merged into the "default" branch.
 
 
+Unreleased
+----------
+
+Fixes:
+
+- Release input decoders and break stream reference cycles when closing a container, including camera inputs; reject resuming input iterators after close.
+
+
 v12.3.0
 -------
 

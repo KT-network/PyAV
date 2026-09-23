@@ -13,7 +13,19 @@ from av.dictionary import Dictionary
 
 
 cdef close_input(InputContainer self):
+    cdef Stream stream
+
     if self.input_was_opened:
+        if self.streams is not None:
+            # These contexts are owned by PyAV, not AVFormatContext. Close
+            # them even if a caller still holds a stream, packet or iterator.
+            for stream in self.streams:
+                if stream.codec_context is not None:
+                    stream.codec_context.close(strict=False)
+
+            # Break the Container -> Stream -> Container reference cycle.
+            self.streams = StreamContainer()
+
         with nogil:
             # This causes `self.ptr` to be set to NULL.
             lib.avformat_close_input(&self.ptr)
@@ -110,6 +122,7 @@ cdef class InputContainer(Container):
         return lib.avio_size(self.ptr.pb)
 
     def close(self):
+        """Close the input and its decoders, releasing the streams."""
         close_input(self)
 
     def demux(self, *args, **kwargs):
@@ -177,6 +190,7 @@ cdef class InputContainer(Container):
                         # Keep track of this so that remuxing is easier.
                         packet._time_base = packet._stream.ptr.time_base
                         yield packet
+                        self._assert_open()
 
             # Flush!
             for i in range(self.ptr.nb_streams):
@@ -185,6 +199,7 @@ cdef class InputContainer(Container):
                     packet._stream = self.streams[i]
                     packet._time_base = packet._stream.ptr.time_base
                     yield packet
+                    self._assert_open()
 
         finally:
             self.set_timeout(None)
@@ -206,6 +221,7 @@ cdef class InputContainer(Container):
         id(kwargs)  # Avoid Cython bug; see demux().
         for packet in self.demux(*args, **kwargs):
             for frame in packet.decode():
+                self._assert_open()
                 yield frame
 
     def seek(
