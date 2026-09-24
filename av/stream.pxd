@@ -19,6 +19,8 @@ cdef class Stream:
     cdef readonly CodecContext codec_context
 
     # Private API.
+    cdef bint _is_open(self) noexcept
+    cdef void _assert_open(self) except *
     cdef _init(self, Container, lib.AVStream*, CodecContext)
     cdef _finalize_for_output(self)
     cdef _get_side_data(self, lib.AVStream *stream)

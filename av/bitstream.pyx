@@ -19,6 +19,11 @@ cdef class BitStreamFilterContext:
         cdef int res
         cdef char *filter_str = filter_description
 
+        if in_stream is not None:
+            in_stream._assert_open()
+        if out_stream is not None:
+            out_stream._assert_open()
+
         with nogil:
             res = lib.av_bsf_list_parse_str(filter_str, &self.ptr)
         err_check(res)

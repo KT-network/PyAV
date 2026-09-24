@@ -13,3 +13,4 @@ cdef class StreamContainer:
     cdef readonly tuple other
 
     cdef add_stream(self, Stream stream)
+    cdef void clear(self) noexcept

@@ -225,6 +225,8 @@ cdef class Container:
         else:
             # We need the context before we open the input AND setup Python IO.
             self.ptr = lib.avformat_alloc_context()
+            if self.ptr == NULL:
+                raise MemoryError("Could not allocate format context")
 
             # Setup interrupt callback
             if self.open_timeout is not None or self.read_timeout is not None:
@@ -253,18 +255,21 @@ cdef class Container:
 
             c_options = Dictionary(self.options, self.container_options)
 
-            self.set_timeout(self.open_timeout)
-            self.start_timeout()
-            with nogil:
-                res = lib.avformat_open_input(
-                    &self.ptr,
-                    name,
-                    ifmt,
-                    &c_options.ptr
-                )
-            self.set_timeout(None)
-            self.err_check(res)
-            self.input_was_opened = True
+            try:
+                self.set_timeout(self.open_timeout)
+                self.start_timeout()
+                with nogil:
+                    res = lib.avformat_open_input(
+                        &self.ptr,
+                        name,
+                        ifmt,
+                        &c_options.ptr
+                    )
+                # err_check may raise a stashed callback error even on success.
+                self.input_was_opened = res >= 0
+                self.err_check(res)
+            finally:
+                self.set_timeout(None)
 
         if format_name is None:
             self.format = build_container_format(self.ptr.iformat, self.ptr.oformat)
@@ -301,7 +306,7 @@ cdef class Container:
         self.interrupt_callback_info.start_time = clock()
 
     cdef _assert_open(self):
-        if self.ptr == NULL:
+        if self.ptr == NULL or (not self.writeable and not self.input_was_opened):
             raise AssertionError("Container is not open")
 
     def _get_flags(self):

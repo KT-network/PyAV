@@ -21,23 +21,31 @@ cdef object _cinit_sentinel = object()
 
 
 cdef CodecContext wrap_codec_context(lib.AVCodecContext *c_ctx, const lib.AVCodec *c_codec):
-    """Build an av.CodecContext for an existing AVCodecContext."""
+    """Take ownership of an AVCodecContext, including if wrapping fails."""
 
-    cdef CodecContext py_ctx
+    cdef CodecContext py_ctx = None
 
-    if c_ctx.codec_type == lib.AVMEDIA_TYPE_VIDEO:
-        from av.video.codeccontext import VideoCodecContext
-        py_ctx = VideoCodecContext(_cinit_sentinel)
-    elif c_ctx.codec_type == lib.AVMEDIA_TYPE_AUDIO:
-        from av.audio.codeccontext import AudioCodecContext
-        py_ctx = AudioCodecContext(_cinit_sentinel)
-    elif c_ctx.codec_type == lib.AVMEDIA_TYPE_SUBTITLE:
-        from av.subtitles.codeccontext import SubtitleCodecContext
-        py_ctx = SubtitleCodecContext(_cinit_sentinel)
-    else:
-        py_ctx = CodecContext(_cinit_sentinel)
+    if c_ctx == NULL:
+        raise MemoryError("Could not allocate codec context")
+    try:
+        if c_ctx.codec_type == lib.AVMEDIA_TYPE_VIDEO:
+            from av.video.codeccontext import VideoCodecContext
+            py_ctx = VideoCodecContext(_cinit_sentinel)
+        elif c_ctx.codec_type == lib.AVMEDIA_TYPE_AUDIO:
+            from av.audio.codeccontext import AudioCodecContext
+            py_ctx = AudioCodecContext(_cinit_sentinel)
+        elif c_ctx.codec_type == lib.AVMEDIA_TYPE_SUBTITLE:
+            from av.subtitles.codeccontext import SubtitleCodecContext
+            py_ctx = SubtitleCodecContext(_cinit_sentinel)
+        else:
+            py_ctx = CodecContext(_cinit_sentinel)
 
-    py_ctx._init(c_ctx, c_codec)
+        py_ctx._init(c_ctx, c_codec)
+    except BaseException:
+        # _init transfers ownership before doing any fallible work.
+        if py_ctx is None or py_ctx.ptr != c_ctx:
+            lib.avcodec_free_context(&c_ctx)
+        raise
 
     return py_ctx
 

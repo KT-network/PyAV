@@ -59,6 +59,8 @@ cdef class OutputContainer(Container):
 
         """
 
+        if template is not None:
+            template._assert_open()
         if (codec_name is None and template is None) or (codec_name is not None and template is not None):
             raise ValueError("needs one of codec_name or template")
 

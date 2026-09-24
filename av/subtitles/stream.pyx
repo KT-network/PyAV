@@ -7,6 +7,7 @@ cdef class SubtitleStream(Stream):
     A :class:`SubtitleStream` can contain many :class:`SubtitleSet` objects accessible via decoding.
     """
     def __getattr__(self, name):
+        self._assert_open()
         return getattr(self.codec_context, name)
 
     cpdef decode(self, Packet packet=None):
@@ -17,6 +18,7 @@ cdef class SubtitleStream(Stream):
 
         .. seealso:: This is a passthrough to :meth:`.CodecContext.decode`.
         """
+        self._assert_open()
         if not packet:
             packet = Packet()
 

@@ -45,7 +45,7 @@ cdef class Packet(Buffer):
             lib.av_packet_free(&self.ptr)
 
     def __repr__(self):
-        stream = self._stream.index if self._stream else 0
+        stream = self.ptr.stream_index
         return (
             f"<av.{self.__class__.__name__} of #{stream}, dts={self.dts},"
             f" pts={self.pts}; {self.ptr.size} bytes at 0x{id(self):x}>"
@@ -91,7 +91,8 @@ cdef class Packet(Buffer):
         return self._stream
 
     @stream.setter
-    def stream(self, Stream stream):
+    def stream(self, Stream stream not None):
+        stream._assert_open()
         self._stream = stream
         self.ptr.stream_index = stream.ptr.index
 

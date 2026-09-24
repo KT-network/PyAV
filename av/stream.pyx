@@ -96,12 +96,15 @@ cdef class Stream:
         )
 
     def __repr__(self):
+        if not self._is_open():
+            return f"<av.{self.__class__.__name__} (closed) at 0x{id(self):x}>"
         return (
             f"<av.{self.__class__.__name__} #{self.index} {self.type or '<notype>'}/"
             f"{self.name or '<nocodec>'} at 0x{id(self):x}>"
         )
 
     def __setattr__(self, name, value):
+        self._assert_open()
         if name == "id":
             self._set_id(value)
             return
@@ -113,7 +116,19 @@ cdef class Stream:
         if name == "time_base":
             self._set_time_base(value)
 
+    cdef bint _is_open(self) noexcept:
+        return (
+            self.ptr != NULL and self.container is not None and
+            self.container.ptr != NULL and
+            (self.container.writeable or self.container.input_was_opened)
+        )
+
+    cdef void _assert_open(self) except *:
+        if not self._is_open():
+            raise AssertionError("Container is not open")
+
     cdef _finalize_for_output(self):
+        self._assert_open()
 
         dict_to_avdict(
             &self.ptr.metadata, self.metadata,
@@ -150,12 +165,14 @@ cdef class Stream:
         :type: int
 
         """
+        self._assert_open()
         return self.ptr.id
 
     cdef _set_id(self, value):
         """
         Setter used by __setattr__ for the id property.
         """
+        self._assert_open()
         if value is None:
             self.ptr.id = 0
         else:
@@ -180,6 +197,7 @@ cdef class Stream:
 
         :type: int
         """
+        self._assert_open()
         return self.ptr.index
 
 
@@ -191,12 +209,14 @@ cdef class Stream:
         :type: :class:`~fractions.Fraction` or ``None``
 
         """
+        self._assert_open()
         return avrational_to_fraction(&self.ptr.time_base)
 
     cdef _set_time_base(self, value):
         """
         Setter used by __setattr__ for the time_base property.
         """
+        self._assert_open()
         to_avrational(value, &self.ptr.time_base)
 
     @property
@@ -207,6 +227,7 @@ cdef class Stream:
 
         :type: :class:`int` or ``None``
         """
+        self._assert_open()
         if self.ptr.start_time != lib.AV_NOPTS_VALUE:
             return self.ptr.start_time
 
@@ -218,6 +239,7 @@ cdef class Stream:
         :type: :class:`int` or ``None``
 
         """
+        self._assert_open()
         if self.ptr.duration != lib.AV_NOPTS_VALUE:
             return self.ptr.duration
 
@@ -230,6 +252,7 @@ cdef class Stream:
 
         :type: :class:`int`
         """
+        self._assert_open()
         return self.ptr.nb_frames
 
     @property
@@ -250,4 +273,5 @@ cdef class Stream:
 
         :type: str
         """
+        self._assert_open()
         return lib.av_get_media_type_string(self.ptr.codecpar.codec_type)

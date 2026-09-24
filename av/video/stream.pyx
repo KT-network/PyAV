@@ -8,6 +8,8 @@ from .frame cimport VideoFrame
 
 cdef class VideoStream(Stream):
     def __repr__(self):
+        if not self._is_open():
+            return f"<av.VideoStream (closed) at 0x{id(self):x}>"
         return (
             f"<av.VideoStream #{self.index} {self.name}, "
             f"{self.format.name if self.format else None} {self.codec_context.width}x"
@@ -15,6 +17,7 @@ cdef class VideoStream(Stream):
         )
 
     def __getattr__(self, name):
+        self._assert_open()
         if name in ("framerate", "rate"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
@@ -29,6 +32,7 @@ cdef class VideoStream(Stream):
         .. seealso:: This is mostly a passthrough to :meth:`.CodecContext.encode`.
         """
 
+        self._assert_open()
         packets = self.codec_context.encode(frame)
         cdef Packet packet
         for packet in packets:
@@ -47,6 +51,7 @@ cdef class VideoStream(Stream):
         .. seealso:: This is a passthrough to :meth:`.CodecContext.decode`.
         """
 
+        self._assert_open()
         return self.codec_context.decode(packet)
 
     @property
@@ -59,6 +64,7 @@ cdef class VideoStream(Stream):
 
         :type: :class:`~fractions.Fraction` or ``None``
         """
+        self._assert_open()
         return avrational_to_fraction(&self.ptr.avg_frame_rate)
 
     @property
@@ -72,6 +78,7 @@ cdef class VideoStream(Stream):
 
         :type: :class:`~fractions.Fraction` or ``None``
         """
+        self._assert_open()
         return avrational_to_fraction(&self.ptr.r_frame_rate)
 
     @property
@@ -83,6 +90,7 @@ cdef class VideoStream(Stream):
 
         :type: :class:`~fractions.Fraction` or ``None``
         """
+        self._assert_open()
         # The two NULL arguments aren't used in FFmpeg >= 4.0
         cdef lib.AVRational val = lib.av_guess_frame_rate(NULL, self.ptr, NULL)
         return avrational_to_fraction(&val)
@@ -96,6 +104,7 @@ cdef class VideoStream(Stream):
 
         :type: :class:`~fractions.Fraction` or ``None``
         """
+        self._assert_open()
         cdef lib.AVRational sar = lib.av_guess_sample_aspect_ratio(self.container.ptr, self.ptr, NULL)
         return avrational_to_fraction(&sar)
     
@@ -109,6 +118,7 @@ cdef class VideoStream(Stream):
         """
         cdef lib.AVRational dar
 
+        self._assert_open()
         lib.av_reduce(
             &dar.num, &dar.den,
             self.format.width * self.sample_aspect_ratio.num,

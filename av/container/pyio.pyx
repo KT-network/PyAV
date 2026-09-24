@@ -45,6 +45,8 @@ cdef class PyIOFile:
 
         # This is effectively the maximum size of reads.
         self.buffer = <unsigned char*>lib.av_malloc(buffer_size)
+        if self.buffer == NULL:
+            raise MemoryError("Could not allocate I/O buffer")
 
         self.iocontext = lib.avio_alloc_context(
             self.buffer, buffer_size,
@@ -55,6 +57,8 @@ cdef class PyIOFile:
             seek_func
         )
 
+        if self.iocontext == NULL:
+            raise MemoryError("Could not allocate I/O context")
         if seek_func:
             self.iocontext.seekable = lib.AVIO_SEEKABLE_NORMAL
         self.iocontext.max_packet_size = buffer_size

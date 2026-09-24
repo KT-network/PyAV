@@ -51,6 +51,14 @@ cdef class StreamContainer:
         else:
             self.other = self.other + (stream, )
 
+    cdef void clear(self) noexcept:
+        self._streams.clear()
+        self.video = ()
+        self.audio = ()
+        self.subtitles = ()
+        self.data = ()
+        self.other = ()
+
     # Basic tuple interface.
     def __len__(self):
         return len(self._streams)

@@ -1,7 +1,8 @@
 from libc.stdint cimport int64_t
-from libc.stdlib cimport free, malloc
+from libc.stdlib cimport calloc, free, malloc
 
 from av.codec.context cimport CodecContext, wrap_codec_context
+from av.container.pyio cimport PyIOFile, pyio_close_custom_gil
 from av.container.streams cimport StreamContainer
 from av.dictionary cimport _Dictionary
 from av.error cimport err_check
@@ -14,22 +15,57 @@ from av.dictionary import Dictionary
 
 cdef close_input(InputContainer self):
     cdef Stream stream
+    cdef PyIOFile file
+    cdef object first_error = None
 
-    if self.input_was_opened:
+    if not self.input_was_opened:
+        return
+
+    # Reject reentrant close/read calls, including calls from I/O callbacks.
+    self.input_was_opened = False
+    try:
         if self.streams is not None:
-            # These contexts are owned by PyAV, not AVFormatContext. Close
-            # them even if a caller still holds a stream, packet or iterator.
             for stream in self.streams:
-                if stream.codec_context is not None:
-                    stream.codec_context.close(strict=False)
+                try:
+                    if stream.codec_context is not None:
+                        stream.codec_context.close(strict=False)
+                except BaseException as exc:
+                    # A decoder error must not leave the other decoders open.
+                    if first_error is None:
+                        first_error = exc
+    finally:
+        try:
+            with nogil:
+                # Also sets self.ptr to NULL. Keep Python I/O alive until done.
+                lib.avformat_close_input(&self.ptr)
+            try:
+                self.err_check(0)  # Propagate any stashed I/O close exception.
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            # Some demuxers leave the top-level custom I/O to its owner.
+            # Files returned by io_open are ours to close; self.file is not.
+            if self.open_files is not None:
+                for file in self.open_files.values():
+                    try:
+                        pyio_close_custom_gil(file.iocontext)
+                        self.err_check(0)
+                    except BaseException as exc:
+                        if first_error is None:
+                            first_error = exc
+        finally:
+            if self.streams is not None:
+                # Break the reference cycle without allocating a replacement.
+                self.streams.clear()
+            if self.open_files is not None:
+                self.open_files.clear()
+            self.file = None
+            self.io_open = None
+            stream = None
+            file = None
 
-            # Break the Container -> Stream -> Container reference cycle.
-            self.streams = StreamContainer()
-
-        with nogil:
-            # This causes `self.ptr` to be set to NULL.
-            lib.avformat_close_input(&self.ptr)
-        self.input_was_opened = False
+    if first_error is not None:
+        raise first_error
 
 
 cdef class InputContainer(Container):
@@ -38,66 +74,79 @@ cdef class InputContainer(Container):
         cdef unsigned int i
         cdef lib.AVStream *stream
         cdef lib.AVCodec *codec
-        cdef lib.AVCodecContext *codec_context
+        cdef lib.AVCodecContext *codec_context = NULL
 
         # If we have either the global `options`, or a `stream_options`, prepare
         # a mashup of those options for each stream.
         cdef lib.AVDictionary **c_options = NULL
+        cdef unsigned int nb_streams = self.ptr.nb_streams
         cdef _Dictionary base_dict, stream_dict
-        if self.options or self.stream_options:
-            base_dict = Dictionary(self.options)
-            c_options = <lib.AVDictionary**>malloc(self.ptr.nb_streams * sizeof(void*))
+        try:
+            try:
+                if nb_streams and (self.options or self.stream_options):
+                    base_dict = Dictionary(self.options)
+                    c_options = <lib.AVDictionary**>calloc(nb_streams, sizeof(lib.AVDictionary*))
+                    if c_options == NULL:
+                        raise MemoryError("Could not allocate stream options")
+                    for i in range(nb_streams):
+                        if i < len(self.stream_options):
+                            stream_dict = base_dict.copy()
+                            stream_dict.update(self.stream_options[i])
+                            err_check(lib.av_dict_copy(&c_options[i], stream_dict.ptr, 0))
+                        else:
+                            err_check(lib.av_dict_copy(&c_options[i], base_dict.ptr, 0))
+
+                self.set_timeout(self.open_timeout)
+                self.start_timeout()
+                with nogil:
+                    ret = lib.avformat_find_stream_info(self.ptr, c_options)
+                self.err_check(ret)
+            finally:
+                self.set_timeout(None)
+                if c_options != NULL:
+                    # Probing may have added streams; use the allocation count.
+                    for i in range(nb_streams):
+                        lib.av_dict_free(&c_options[i])
+                    free(c_options)
+
+            self.streams = StreamContainer()
             for i in range(self.ptr.nb_streams):
-                c_options[i] = NULL
-                if i < len(self.stream_options) and self.stream_options:
-                    stream_dict = base_dict.copy()
-                    stream_dict.update(self.stream_options[i])
-                    lib.av_dict_copy(&c_options[i], stream_dict.ptr, 0)
+                stream = self.ptr.streams[i]
+                codec = lib.avcodec_find_decoder(stream.codecpar.codec_id)
+                if codec:
+                    codec_context = lib.avcodec_alloc_context3(codec)
+                    if codec_context == NULL:
+                        raise MemoryError("Could not allocate codec context")
+                    try:
+                        err_check(lib.avcodec_parameters_to_context(codec_context, stream.codecpar))
+                        codec_context.pkt_timebase = stream.time_base
+                    except BaseException:
+                        lib.avcodec_free_context(&codec_context)
+                        raise
+                    # wrap_codec_context takes ownership, including on failure.
+                    py_codec_context = wrap_codec_context(codec_context, codec)
+                    codec_context = NULL
                 else:
-                    lib.av_dict_copy(&c_options[i], base_dict.ptr, 0)
+                    py_codec_context = None
+                self.streams.add_stream(wrap_stream(self, stream, py_codec_context))
 
-        self.set_timeout(self.open_timeout)
-        self.start_timeout()
-        with nogil:
-            # This peeks are the first few frames to:
-            #   - set stream.disposition from codec.audio_service_type (not exposed);
-            #   - set stream.codec.bits_per_coded_sample;
-            #   - set stream.duration;
-            #   - set stream.start_time;
-            #   - set stream.r_frame_rate to average value;
-            #   - open and closes codecs with the options provided.
-            ret = lib.avformat_find_stream_info(
-                self.ptr,
-                c_options
-            )
-        self.set_timeout(None)
-        self.err_check(ret)
-
-        # Cleanup all of our options.
-        if c_options:
-            for i in range(self.ptr.nb_streams):
-                lib.av_dict_free(&c_options[i])
-            free(c_options)
-
-        self.streams = StreamContainer()
-        for i in range(self.ptr.nb_streams):
-            stream = self.ptr.streams[i]
-            codec = lib.avcodec_find_decoder(stream.codecpar.codec_id)
-            if codec:
-                # allocate and initialise decoder
-                codec_context = lib.avcodec_alloc_context3(codec)
-                err_check(lib.avcodec_parameters_to_context(codec_context, stream.codecpar))
-                codec_context.pkt_timebase = stream.time_base
-                py_codec_context = wrap_codec_context(codec_context, codec)
-            else:
-                # no decoder is available
-                py_codec_context = None
-            self.streams.add_stream(wrap_stream(self, stream, py_codec_context))
-
-        self.metadata = avdict_to_dict(self.ptr.metadata, self.metadata_encoding, self.metadata_errors)
+            self.metadata = avdict_to_dict(self.ptr.metadata, self.metadata_encoding, self.metadata_errors)
+        except BaseException:
+            # Partially built streams can already form a reference cycle.
+            # Release them now, without replacing the original open error.
+            try:
+                close_input(self)
+            except BaseException:
+                pass
+            raise
 
     def __dealloc__(self):
-        close_input(self)
+        # Python members may already have been cleared by cyclic GC. Their
+        # own destructors release the codec contexts and custom I/O buffers.
+        if self.input_was_opened:
+            self.input_was_opened = False
+            with nogil:
+                lib.avformat_close_input(&self.ptr)
 
     @property
     def start_time(self):
@@ -122,7 +171,11 @@ cdef class InputContainer(Container):
         return lib.avio_size(self.ptr.pb)
 
     def close(self):
-        """Close the input and its decoders, releasing the streams."""
+        """Close the input and its decoders, releasing streams and custom I/O.
+
+        Already returned frames and packet data remain valid. Stream operations
+        require an open container. A caller-supplied file object is not closed.
+        """
         close_input(self)
 
     def demux(self, *args, **kwargs):
