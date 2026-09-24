@@ -1,0 +1,81 @@
+name: tests
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+jobs:
+  package-source:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8.10"
+          architecture: x64
+      - name: Build source package
+        run: |
+          python -m pip install cython setuptools
+          python setup.py sdist
+        shell: bash
+      - name: Upload source package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-source
+          path: dist/
+
+  package-wheel:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8.10"
+          architecture: x64
+      - name: Build wheels
+        env:
+          CIBW_ARCHS: AMD64
+          CIBW_BUILD: cp38-win_amd64
+          CIBW_BEFORE_BUILD_WINDOWS: >-
+            python -c "import sys; assert sys.version_info[:3] == (3, 8, 10), sys.version"
+            && python scripts\fetch-vendor.py --config-file scripts\ffmpeg-6.1.json C:\cibw\vendor
+          CIBW_ENVIRONMENT_WINDOWS: INCLUDE=C:\\cibw\\vendor\\include LIB=C:\\cibw\\vendor\\lib PYAV_SKIP_TESTS=unicode_filename
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: delvewheel repair --add-path C:\cibw\vendor\bin -w {dest_dir} {wheel}
+          CIBW_TEST_COMMAND: >-
+            python -c "import sys; assert sys.version_info[:3] == (3, 8, 10), sys.version"
+            && python -c "import os; os.rename(r'{project}/av', r'{project}/av.disabled')"
+            && python -m unittest discover -t "{project}" -s "{project}/tests"
+            && python -c "import os; os.rename(r'{project}/av.disabled', r'{project}/av')"
+          CIBW_TEST_REQUIRES: numpy pillow
+        run: |
+          # Keep the CPython 3.8 build configuration, which uses Python 3.8.10.
+          python -m pip install cibuildwheel==2.23.3 delvewheel
+          python -m cibuildwheel --platform windows --output-dir dist
+        shell: bash
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-cp38-amd64
+          path: dist/
+
+  publish:
+    runs-on: windows-latest
+    needs: [package-source, package-wheel]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8.10"
+          architecture: x64
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+          TWINE_NON_INTERACTIVE: "1"
+        run: |
+          python -m pip install twine
+          python -m twine upload dist/*
+        shell: bash
