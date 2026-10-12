@@ -1,98 +1,126 @@
-name: tests
+name: Build Python 3.8 wheels
+
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+  push:
+    branches: [main, 'codex/**']
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+
+# Build artifacts only; this workflow cannot publish a GitHub Release.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CIBW_BUILD_FRONTEND: 'pip; args: --no-build-isolation'
+  CIBW_TEST_COMMAND: 'python "{project}/scripts/ci/test-wheel.py" "{project}"'
+  CIBW_TEST_REQUIRES: 'numpy==1.21.6 pillow==9.5.0'
+
 jobs:
-  package-source:
-    runs-on: ubuntu-latest
+  windows:
+    name: CPython 3.8 / Windows 7 SP1 and Windows 10 / x64
+    runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.8"
-      - name: Build source package
-        run: |
-          pip install cython
-          python scripts/fetch-vendor.py --config-file scripts/ffmpeg-6.1.json /tmp/vendor
-          PKG_CONFIG_PATH=/tmp/vendor/lib/pkgconfig python setup.py sdist
-      - name: Upload source package
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-source
-          path: dist/
+          # Last CPython 3.8 Windows installer; supports Windows 7 SP1.
+          python-version: '3.8.10'
+          architecture: x64
 
-  package-wheel:
-    runs-on: ${{ matrix.os }}
+      - name: Select the Visual Studio 2019 compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: '14.29'
+
+      - name: Install wheel tools
+        run: python -m pip install cibuildwheel==2.23.3 delvewheel==1.9.0 pefile==2024.8.26
+
+      - name: Build, bundle DLLs and test the installed wheel
+        env:
+          CIBW_BUILD: cp38-win_amd64
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BEFORE_BUILD_WINDOWS: >-
+            python -m pip install -r "{project}/scripts/ci/requirements-build-python38.txt"
+            && python "{project}/scripts/fetch-vendor.py" --config-file "{project}/scripts/ffmpeg-6.1.json" C:/cibw/vendor
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            INCLUDE="C:/cibw/vendor/include;$INCLUDE" LIB="C:/cibw/vendor/lib;$LIB"
+            DISTUTILS_USE_SDK=1 MSSdk=1
+            CL="/D_WIN32_WINNT=0x0601 /DWINVER=0x0601"
+            LINK="/SUBSYSTEM:CONSOLE,6.01"
+            PYAV_SKIP_TESTS=unicode_filename
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            delvewheel repair --add-path C:/cibw/vendor/bin -w {dest_dir} {wheel}
+        run: python -m cibuildwheel --platform windows --output-dir dist
+
+      - name: Check the wheel for known Windows 7 incompatibilities
+        run: python scripts/ci/check-windows-wheel.py dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyav-12.3.0-cp38-windows-x64
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: CPython 3.8 / Ubuntu, Kylin and UOS / ${{ matrix.arch }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            arch: arm64
-          - os: macos-13
-            arch: x86_64
-          - os: ubuntu-latest
-            arch: aarch64
-          - os: ubuntu-latest
-            arch: i686
-          - os: ubuntu-latest
-            arch: x86_64
-          - os: windows-latest
-            arch: AMD64
+        arch: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.8"
-      - name: Set up QEMU
-        if: matrix.os == 'ubuntu-latest'
-        uses: docker/setup-qemu-action@v3
-      - name: Install packages
-        if: matrix.os == 'macos-13'
-        run: |
-          brew update
-          brew install pkg-config
-      - name: Set deployment target
-        if: matrix.os == 'macos-13' || matrix.os == 'macos-14'
-        run: echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> $GITHUB_ENV
-      - name: Build wheels
-        env:
-          CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_BEFORE_ALL_LINUX: yum install -y alsa-lib libxcb
-          CIBW_BEFORE_BUILD: python scripts/fetch-vendor.py --config-file scripts/ffmpeg-6.1.json /tmp/vendor
-          CIBW_BEFORE_BUILD_WINDOWS: python scripts\fetch-vendor.py --config-file scripts\ffmpeg-6.1.json C:\cibw\vendor
-          CIBW_ENVIRONMENT_LINUX: LD_LIBRARY_PATH=/tmp/vendor/lib:$LD_LIBRARY_PATH PKG_CONFIG_PATH=/tmp/vendor/lib/pkgconfig
-          CIBW_ENVIRONMENT_MACOS: PKG_CONFIG_PATH=/tmp/vendor/lib/pkgconfig LDFLAGS=-headerpad_max_install_names
-          CIBW_ENVIRONMENT_WINDOWS: INCLUDE=C:\\cibw\\vendor\\include LIB=C:\\cibw\\vendor\\lib PYAV_SKIP_TESTS=unicode_filename
-          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: delvewheel repair --add-path C:\cibw\vendor\bin -w {dest_dir} {wheel}
-          CIBW_SKIP: "*-musllinux*"
-          CIBW_TEST_COMMAND: mv {project}/av {project}/av.disabled && python -m unittest discover -t {project} -s tests && mv {project}/av.disabled {project}/av
-          CIBW_TEST_REQUIRES: numpy
-          # skip tests when there are no binary wheels of numpy
-          CIBW_TEST_SKIP: pp* *_i686
-        run: |
-          pip install cibuildwheel delvewheel
-          cibuildwheel --output-dir dist
-        shell: bash
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-${{ matrix.os }}-${{ matrix.arch }}
-          path: dist/
+          python-version: '3.8'
 
-  publish:
-    runs-on: ubuntu-latest
-    needs: [package-source, package-wheel]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Enable ARM64 emulation
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
         with:
-          merge-multiple: true
-          path: dist/
-#      - name: Publish to PyPI
-#        if: github.event_name == 'release' && github.event.action == 'published'
-#        uses: pypa/gh-action-pypi-publish@release/v1
-#        with:
-#          user: __token__
-#          password: ${{ secrets.PYPI_TOKEN }}
+          platforms: arm64
+
+      - name: Install wheel tools
+        run: python -m pip install cibuildwheel==2.23.3
+
+      - name: Build, bundle FFmpeg and test the installed wheel
+        env:
+          CIBW_BUILD: cp38-manylinux_${{ matrix.arch }}
+          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
+          # glibc 2.17 is the baseline for all bundled shared libraries too.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux2014
+          CIBW_BEFORE_ALL_LINUX: yum install -y alsa-lib libxcb
+          CIBW_BEFORE_BUILD_LINUX: >-
+            python -m pip install -r "{project}/scripts/ci/requirements-build-python38.txt"
+            && python "{project}/scripts/fetch-vendor.py" --config-file "{project}/scripts/ffmpeg-6.1.json" /tmp/vendor
+          CIBW_ENVIRONMENT_LINUX: >-
+            LD_LIBRARY_PATH=/tmp/vendor/lib:$LD_LIBRARY_PATH
+            PKG_CONFIG_PATH=/tmp/vendor/lib/pkgconfig
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair --plat manylinux2014_${{ matrix.arch }} -w {dest_dir} {wheel}
+        run: python -m cibuildwheel --platform linux --output-dir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyav-12.3.0-cp38-linux-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30

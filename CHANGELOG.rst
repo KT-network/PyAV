@@ -20,6 +20,8 @@ We are operating with `semantic versioning <http://semver.org>`_.
 Unreleased
 ----------
 
+This fork retains version 12.3.0 and includes fixes for Python 3.8.
+
 Fixes:
 
 - Release input decoders and break stream reference cycles when closing a container, including camera inputs; reject resuming input iterators after close.
